@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Babylon.js Enhanced Scene</title>
+    <!-- Load Babylon.js library for 3D graphics -->
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <!-- Load Cannon.js for physics simulation -->
+    <script src="https://cdn.jsdelivr.net/npm/cannon/build/cannon.min.js"></script>
+    <!-- Load Babylon.js GUI for creating user interface elements -->
+    <script src="https://cdn.babylonjs.com/gui/babylon.gui.min.js"></script>
+    <style>
+        /* Make the page take up the full screen and remove scrollbars */
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            touch-action: none;
+        }
+        /* Make the canvas fill the screen */
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none;
+        }
+    </style>
+</head>
+<body>
+<canvas id="renderCanvas"></canvas> <!-- This is where the 3D scene will be drawn -->
+<script>
+    // Get the canvas element from the HTML
+    const canvas = document.getElementById("renderCanvas");
+
+    // Set some initial game settings
+    let frictionCoefficient = 0.9; // How much objects slow down
+    let impulseStrength = 20; // How strong the shots are
+    const engine = new BABYLON.Engine(canvas, true); // Create the Babylon.js engine
+
+    // Initialize counters and arrays to keep track of objects
+    let boxCount = 0;
+    let shadowGenerator;
+    const spheres = []; // Array to store spheres (balls)
+    const boxes = []; // Array to store boxes
+    const planeSize = 70; // Size of the ground
+
+    let gameOver = false; // Is the game over?
+    let currentTurn = "blue"; // Which team's turn it is
+
+    let createBoxMode = false; // Are we in box creation mode?
+
+    let camera;
+    let redTeamCounter = 500; // Red team's score or resources
+    let blueTeamCounter = 500; // Blue team's score or resources
+    let blueBallsCount = 4; // Number of blue balls
+    let redBallsCount = 4; // Number of red balls
+    let blueBoxesOnGround = 0; // Blue team's boxes on the ground
+    let redBoxesOnGround = 0; // Red team's boxes on the ground
+
+    // Variables to track camera movement
+    let lastCameraAlpha;
+    let lastCameraBeta;
+    let lastCameraRadius;
+
+    let initialMessage; // Message shown at the start
+    let cameraMovedOnce = false; // Has the camera moved?
+
+    // Function to create the 3D scene
+    const createScene = () => {
+        const scene = new BABYLON.Scene(engine);
+
+        // Enable physics in the scene using Cannon.js
+        const physicsPlugin = new BABYLON.CannonJSPlugin();
+        scene.enablePhysics(new BABYLON.Vector3(0, -9.81, 0), physicsPlugin);
+
+        // Set physics solver settings
+        physicsPlugin.world.solver.iterations = 20;
+        physicsPlugin.world.solver.tolerance = 0.001;
+
+        // Set the background color of the scene
+        scene.clearColor = new BABYLON.Color3(0.5, 0.8, 1.0); // Light blue sky
+
+        // Create a camera that can rotate around a target
+        camera = new BABYLON.ArcRotateCamera("camera", Math.PI / 2, Math.PI / 3, 50, BABYLON.Vector3.Zero(), scene);
+        camera.attachControl(canvas, true); // Let the user control the camera with mouse/touch
+
+        // Limit how far the camera can move up and down
+        camera.lowerBetaLimit = 0.01;
+        camera.upperBetaLimit = Math.PI / 2 - 0.005;
+        // Limit how far the camera can zoom in and out
+        camera.lowerRadiusLimit = 1;
+        camera.upperRadiusLimit = 100;
+
+        // Make the camera movement smooth
+        camera.inertia = 0.9;
+        camera.wheelPrecision = 30;
+
+        // Remember the initial camera angles
+        lastCameraAlpha = camera.alpha;
+        lastCameraBeta = camera.beta;
+        lastCameraRadius = camera.radius;
+
+        // Add a light that shines from above
+        const hemiLight = new BABYLON.HemisphericLight("hemiLight", new BABYLON.Vector3(0, 1, 0), scene);
+        hemiLight.intensity = 0.8;
+
+        // Add a directional light to create shadows
+        const dirLight = new BABYLON.DirectionalLight("dirLight", new BABYLON.Vector3(-1, -2, -1), scene);
+        dirLight.position = new BABYLON.Vector3(20, 40, 20);
+        dirLight.intensity = 0.6;
+
+        // Create shadows in the scene
+        shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
+        shadowGenerator.useBlurExponentialShadowMap = true;
+        shadowGenerator.blurKernel = 32;
+
+        // Create the ground (a big flat surface)
+        const plane = BABYLON.MeshBuilder.CreateGround("plane", { width: planeSize, height: planeSize }, scene);
+        plane.isPickable = true; // Let the ground be clickable
+        plane.receiveShadows = true; // Let the ground receive shadows
+        // Add physics to the ground so other objects can collide with it
+        plane.physicsImpostor = new BABYLON.PhysicsImpostor(
+            plane,
+            BABYLON.PhysicsImpostor.BoxImpostor,
+            { mass: 0, restitution: 0.9, friction: 1 },
+            scene
+        );
+
+        // Create a checkerboard texture for the ground
+        const dynamicTexture = new BABYLON.DynamicTexture("dynamicTexture", { width: 512, height: 512 }, scene);
+        const ctx = dynamicTexture.getContext();
+        const squaresPerSide = 8; // Number of squares per row and column
+        const squareSize = 512 / squaresPerSide;
+        for (let i = 0; i < squaresPerSide; i++) {
+            for (let j = 0; j < squaresPerSide; j++) {
+                const isLightGreen = (i + j) % 2 === 0; // Alternate colors
+                ctx.fillStyle = isLightGreen ? "#2ecc71" : "#27ae60"; // Light and dark green
+                ctx.fillRect(i * squareSize, j * squareSize, squareSize, squareSize);
+            }
+        }
+        dynamicTexture.update(); // Apply the drawing to the texture
+
+        // Apply the checkerboard texture to the ground
+        const planeMaterial = new BABYLON.StandardMaterial("planeMaterial", scene);
+        planeMaterial.diffuseTexture = dynamicTexture;
+        planeMaterial.specularColor = new BABYLON.Color3(0,0,0); // Remove shiny spots
+        plane.material = planeMaterial;
+
+        // Create walls around the ground to keep objects from flying away
+        const wallHeight = 2;
+        const wallThickness = 0.3;
+
+        // Function to create a wall
+        const createWall = (name, width, height, depth, position) => {
+            const wall = BABYLON.MeshBuilder.CreateBox(name, { width, height, depth }, scene);
+            wall.position = position;
+            wall.isPickable = false; // Walls can't be clicked
+            const wallMaterial = new BABYLON.StandardMaterial(name + "Material", scene);
+            wallMaterial.diffuseColor = new BABYLON.Color3(0.7, 0.7, 0.7); // Grey color
+            wallMaterial.alpha = 0.5; // Make it slightly transparent
+            wallMaterial.transparencyMode = BABYLON.Material.MATERIAL_ALPHABLEND;
+            wall.material = wallMaterial;
+            // Add physics to the wall
+            wall.physicsImpostor = new BABYLON.PhysicsImpostor(
+                wall,
+                BABYLON.PhysicsImpostor.BoxImpostor,
+                { mass: 0, restitution: 0.1, friction: 1 },
+                scene
+            );
+            shadowGenerator.addShadowCaster(wall, true); // Let walls cast shadows
+        };
+
+        // Create four walls: front, back, left, and right
+        createWall("frontWall", planeSize, wallHeight, wallThickness, new BABYLON.Vector3(0, wallHeight / 2, planeSize / 2));
+        createWall("backWall", planeSize, wallHeight, wallThickness, new BABYLON.Vector3(0, wallHeight / 2, -planeSize / 2));
+        createWall("leftWall", wallThickness, wallHeight, planeSize, new BABYLON.Vector3(-planeSize / 2, wallHeight / 2, 0));
+        createWall("rightWall", wallThickness, wallHeight, planeSize, new BABYLON.Vector3(planeSize / 2, wallHeight / 2, 0));
+
+        // Function to create a green box at a specific position
+        const createRandomGreenBoxAtPosition = (position) => {
+            // Choose a random shade of green
+            const boxColor = new BABYLON.Color3(
+                Math.random() * 0.3,
+                1,
+                Math.random() * 0.3
+            );
+
+            // Create the box
+            const box = BABYLON.MeshBuilder.CreateBox("box" + (boxCount++), { size: 1 }, scene);
+            box.position = position;
+            box.isPickable = true; // Boxes can be clicked
+            const boxMaterial = new BABYLON.StandardMaterial("boxMaterial", scene);
+            boxMaterial.diffuseColor = boxColor;
+            box.material = boxMaterial;
+            box.teamColor = "green"; // This box belongs to the green team
+            // Add physics to the box
+            box.physicsImpostor = new BABYLON.PhysicsImpostor(
+                box,
+                BABYLON.PhysicsImpostor.BoxImpostor,
+                {
+                    mass: 1,
+                    restitution: 0.9,
+                    friction: 1
+                },
+                scene
+            );
+
+            // Adjust some physics properties
+            box.physicsImpostor.executeNativeFunction((body) => {
+                body.linearDamping = 0.1; // Slow down movement over time
+                body.angularDamping = 0.1; // Slow down rotation over time
+                body.allowSleep = true; // Allow the box to stop moving when it's not
+                body.sleepSpeedLimit = 0.1;
+                body.sleepTimeLimit = 1;
+            });
+
+            shadowGenerator.addShadowCaster(box, true); // Let boxes cast shadows
+            boxes.push(box); // Add the box to the array of boxes
+            return box;
+        };
+
+        // Functions to get random colors for blue and red teams
+        const getLightBlue = () => new BABYLON.Color3(
+            0.4 + Math.random()*0.2,
+            0.4 + Math.random()*0.2,
+            0.7 + Math.random()*0.3
+        );
+
+        const getLightRed = () => new BABYLON.Color3(
+            0.7 + Math.random()*0.3,
+            0.3 + Math.random()*0.2,
+            0.3 + Math.random()*0.2
+        );
+
+        // Function to create walls made of colored boxes for each team
+        const createColoredWall = (zPosition, colorFunc, teamcolor) => {
+            const rows = 5; // Number of rows of boxes
+            const boxesPerRow = 5; // Number of boxes in each row
+            const boxSpacing = 2; // Space between boxes
+            const startX = -((boxesPerRow - 1) * boxSpacing) / 2; // Start position on X-axis
+            const startZ = zPosition; // Position on Z-axis
+
+            for (let row = 0; row < rows; row++) { // Create multiple rows
+                for (let i = 0; i < boxesPerRow; i++) { // Create boxes in each row
+                    const position = new BABYLON.Vector3(
+                        startX + i * boxSpacing,
+                        0.5 + row * 1.1, // Stack boxes on top of each other
+                        startZ
+                    );
+                    const box = BABYLON.MeshBuilder.CreateBox("box" + (boxCount++), { size: 1 }, scene);
+                    box.position = position;
+                    box.isPickable = true; // Boxes can be clicked
+                    const boxMaterial = new BABYLON.StandardMaterial("boxMaterial", scene);
+                    boxMaterial.diffuseColor = colorFunc(); // Set box color
+                    box.material = boxMaterial;
+                    box.teamColor = teamcolor; // Assign team color
+                    // Add physics to the box
+                    box.physicsImpostor = new BABYLON.PhysicsImpostor(
+                        box,
+                        BABYLON.PhysicsImpostor.BoxImpostor,
+                        {
+                            mass: 1,
+                            restitution: 0.0,
+                            friction: 1
+                        },
+                        scene
+                    );
+
+                    // Adjust some physics properties
+                    box.physicsImpostor.executeNativeFunction((body) => {
+                        body.linearDamping = 0.3;
+                        body.angularDamping = 0.3;
+                        body.allowSleep = true;
+                        body.sleepSpeedLimit = 0.1;
+                        body.sleepTimeLimit = 1;
+                    });
+
+                    shadowGenerator.addShadowCaster(box, true); // Let boxes cast shadows
+                    boxes.push(box); // Add the box to the array of boxes
+                }
+            }
+        };
+
+        // Create blue and red walls
+        createColoredWall(21, getLightBlue, "blue");
+        createColoredWall(-21, getLightRed, "red");
+
+        // Function to create a pine tree at a specific position
+        const createPineTree = (x, z) => {
+            const treeBox = BABYLON.MeshBuilder.CreateBox("treeBox", {
+                width: 0.5,
+                height: 5,
+                depth: 0.5
+            }, scene);
+            treeBox.position.set(x, 3, z);
+            treeBox.visibility = 0; // Make the main box invisible
+            treeBox.isPickable = false; // Trees can't be clicked
+
+            // Create the trunk of the tree
+            const trunk = BABYLON.MeshBuilder.CreateCylinder("trunk", { diameter: 0.35, height: 2 }, scene);
+            trunk.position.set(0, -2, 0);
+            trunk.parent = treeBox; // Attach the trunk to the main tree box
+            trunk.isPickable = false; // Trunk can't be clicked
+            const trunkMaterial = new BABYLON.StandardMaterial("trunkMaterial", scene);
+            trunkMaterial.diffuseColor = new BABYLON.Color3(0.4, 0.2, 0.1); // Brown color
+            trunk.material = trunkMaterial;
+
+            // Create the leaves of the tree
+            const leaves = BABYLON.MeshBuilder.CreateCylinder("leaves", { diameterTop: 0, diameterBottom: 3, height: 4 }, scene);
+            leaves.position.set(0, 1, 0);
+            leaves.parent = treeBox; // Attach leaves to the main tree box
+            leaves.isPickable = false; // Leaves can't be clicked
+            const leavesMaterial = new BABYLON.StandardMaterial("leavesMaterial", scene);
+            leavesMaterial.diffuseColor = new BABYLON.Color3(0, 0.6, 0); // Green color
+            leaves.material = leavesMaterial;
+
+            // Add physics to the tree
+            treeBox.physicsImpostor = new BABYLON.PhysicsImpostor(
+                treeBox,
+                BABYLON.PhysicsImpostor.BoxImpostor,
+                { mass: 0, restitution: 0.1, friction: 1 },
+                scene
+            );
+
+            shadowGenerator.addShadowCaster(trunk, true); // Let trunk cast shadows
+            shadowGenerator.addShadowCaster(leaves, true); // Let leaves cast shadows
+        };
+
+        // Create 10 pine trees at random positions
+        for (let i = 0; i < 10; i++) {
+            const x = Math.random() * (planeSize - 10) - (planeSize - 10) / 2;
+            const z = Math.random() * (planeSize - 10) - (planeSize - 10) / 2;
+            createPineTree(x, z);
+        }
+
+        // Create a user interface (UI) that covers the whole screen
+        const advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI("UI");
+        advancedTexture.isPointerBlocker = false; // Let clicks pass through if needed
+
+        // Create a "Create Box" button at the top-left corner
+        const buttonCreateBox = BABYLON.GUI.Button.CreateSimpleButton("createBoxBtn", "Create Box");
+        buttonCreateBox.width = "150px";
+        buttonCreateBox.height = "40px";
+        buttonCreateBox.color = "white";
+        buttonCreateBox.background = "gray";
+        buttonCreateBox.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        buttonCreateBox.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        buttonCreateBox.top = "10px";
+        buttonCreateBox.left = "10px";
+        advancedTexture.addControl(buttonCreateBox); // Add the button to the UI
+
+        // When the "Create Box" button is clicked
+        buttonCreateBox.onPointerUpObservable.add(() => {
+            createBoxMode = !createBoxMode; // Toggle box creation mode
+            buttonCreateBox.background = createBoxMode ? "green" : "gray"; // Change button color
+        });
+
+        // Create a "Reset Game" button below the "Create Box" button
+        const buttonReset = BABYLON.GUI.Button.CreateSimpleButton("resetBtn", "Reset Game");
+        buttonReset.width = "150px";
+        buttonReset.height = "40px";
+        buttonReset.color = "white";
+        buttonReset.background = "green";
+        buttonReset.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        buttonReset.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        buttonReset.top = "60px";
+        buttonReset.left = "10px";
+        advancedTexture.addControl(buttonReset); // Add the button to the UI
+
+        // When the "Reset Game" button is clicked
+        buttonReset.onPointerUpObservable.add(() => {
+            location.reload(); // Reload the page to reset the game
+        });
+
+        // Create a label to show the speed (impulseStrength) at the bottom-left
+        const impulseSliderLabel = new BABYLON.GUI.TextBlock();
+        impulseSliderLabel.text = "Speed: " + Math.round(impulseStrength);
+        impulseSliderLabel.color = "white";
+        impulseSliderLabel.height = "30px";
+        impulseSliderLabel.width = "150px";
+        impulseSliderLabel.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
+        impulseSliderLabel.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        impulseSliderLabel.top = "-100px";
+        impulseSliderLabel.left = "10px";
+        advancedTexture.addControl(impulseSliderLabel); // Add the label to the UI
+
+        // Create a slider to adjust the speed
+        const impulseSlider = new BABYLON.GUI.Slider();
+        impulseSlider.minimum = 1;
+        impulseSlider.maximum = 100;
+        impulseSlider.value = impulseStrength;
+        impulseSlider.height = "20px";
+        impulseSlider.width = "150px";
+        impulseSlider.color = "white";
+        impulseSlider.background = "gray";
+        impulseSlider.borderColor = "black";
+        impulseSlider.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
+        impulseSlider.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        impulseSlider.top = "-70px";
+        impulseSlider.left = "10px";
+        // When the slider value changes
+        impulseSlider.onValueChangedObservable.add((val) => {
+            impulseStrength = val; // Update the speed
+            impulseSliderLabel.text = "Speed: " + Math.round(impulseStrength); // Update the label
+        });
+        advancedTexture.addControl(impulseSlider); // Add the slider to the UI
+
+        // Create a text block to show the blue team's score and resources
+        const blueCounterText = new BABYLON.GUI.TextBlock();
+        blueCounterText.text = "Blue: " + Math.round(blueTeamCounter) + " (Boxes: 0, Balls: " + blueBallsCount + ")";
+        blueCounterText.color = "blue";
+        blueCounterText.height = "30px";
+        blueCounterText.width = "300px";
+        blueCounterText.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        blueCounterText.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
+        blueCounterText.top = "-160px";
+        blueCounterText.left = "10px";
+        advancedTexture.addControl(blueCounterText); // Add to the UI
+
+        // Create a text block to show the red team's score and resources
+        const redCounterText = new BABYLON.GUI.TextBlock();
+        redCounterText.text = "Red: " + Math.round(redTeamCounter) + " (Boxes: 0, Balls: " + redBallsCount + ")";
+        redCounterText.color = "red";
+        redCounterText.height = "30px";
+        redCounterText.width = "300px";
+        redCounterText.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_LEFT;
+        redCounterText.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_BOTTOM;
+        redCounterText.top = "-130px";
+        redCounterText.left = "10px";
+        advancedTexture.addControl(redCounterText); // Add to the UI
+
+        // Create a text block to show whose turn it is at the top-right
+        const turnMessage = new BABYLON.GUI.TextBlock();
+        turnMessage.text = "Blue turn"; // Start with blue team's turn
+        turnMessage.color = "blue";
+        turnMessage.height = "50px";
+        turnMessage.width = "200px";
+        turnMessage.fontSize = 24;
+        turnMessage.top = "10px";
+        turnMessage.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_RIGHT; // Align to the right
+        turnMessage.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        turnMessage.left = "-10px"; // Slightly move left to fit on screen
+        advancedTexture.addControl(turnMessage); // Add to the UI
+
+        // Create an initial message in the center of the screen
+        initialMessage = new BABYLON.GUI.TextBlock();
+        initialMessage.text = "Double click ball to shoot.\nCreate boxes to defend your wall"; // Instructions
+        initialMessage.color = "white";
+        initialMessage.height = "60px";
+        initialMessage.width = "400px";
+        initialMessage.fontSize = 20;
+        initialMessage.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        initialMessage.textVerticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        initialMessage.top = "80px";
+        initialMessage.horizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        initialMessage.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_TOP;
+        advancedTexture.addControl(initialMessage); // Add to the UI
+
+        // Create a text block to show the winning message
+        const winMessage = new BABYLON.GUI.TextBlock();
+        winMessage.text = ""; // Start with no message
+        winMessage.color = "white";
+        winMessage.height = "100px";
+        winMessage.width = "100%";
+        winMessage.fontSize = 72;
+        winMessage.textHorizontalAlignment = BABYLON.GUI.Control.HORIZONTAL_ALIGNMENT_CENTER;
+        winMessage.textVerticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        winMessage.verticalAlignment = BABYLON.GUI.Control.VERTICAL_ALIGNMENT_CENTER;
+        advancedTexture.addControl(winMessage); // Add to the UI
+
+        // Function to update the score counters on the UI
+        function updateCounters() {
+            blueCounterText.text = `Blue: ${Math.round(blueTeamCounter)} (Boxes: ${blueBoxesOnGround}, Balls: ${blueBallsCount})`;
+            redCounterText.text = `Red: ${Math.round(redTeamCounter)} (Boxes: ${redBoxesOnGround}, Balls: ${redBallsCount})`;
+            checkWinCondition(); // Check if someone has won
+        }
+
+        // Function to check if a team has won the game
+        function checkWinCondition() {
+            if (gameOver) return; // If game is already over, do nothing
+            // Check if blue team lost
+            if (blueTeamCounter <= 0 || blueBallsCount === 0 || blueBoxesOnGround == 0) {
+                gameOver = true;
+                winMessage.text = "Team Red wins!"; // Show red team victory
+                winMessage.color = "red";
+            }
+
+            // Check if red team lost
+            if (redTeamCounter <= 0 || redBallsCount === 0 || redBoxesOnGround == 0) {
+                gameOver = true;
+                winMessage.text = "Team Blue wins!"; // Show blue team victory
+                winMessage.color = "blue";
+            }
+        }
+
+        // Function to get the current team's score or resources
+        function getCurrentTeamCounter() {
+            return currentTurn === "red" ? redTeamCounter : blueTeamCounter;
+        }
+
+        // Function to set the current team's score or resources
+        function setCurrentTeamCounter(value) {
+            if (currentTurn === "red") {
+                redTeamCounter = value;
+            } else {
+                blueTeamCounter = value;
+            }
+            updateCounters(); // Update the UI
+            checkWinCondition(); // Check if someone has won
+        }
+
+        // Function to shoot a sphere (ball) in a certain direction
+        const setSphereVelocity = (sphere, clickInfo) => {
+            let teamCounter = getCurrentTeamCounter(); // Get current team's resources
+            let finalSpeed = Math.min(impulseStrength, teamCounter); // Limit speed by team's resources
+
+            const cameraPosition = scene.activeCamera.position.clone(); // Get camera position
+            let direction;
+            if (clickInfo.hit) {
+                const clickedPoint = clickInfo.pickedPoint.clone(); // Where the player clicked
+                direction = clickedPoint.subtract(cameraPosition).normalize(); // Calculate direction
+            } else {
+                direction = scene.activeCamera.getForwardRay().direction.clone(); // Default direction
+            }
+
+            const velocity = direction.scale(finalSpeed); // Calculate velocity
+            sphere.physicsImpostor.setLinearVelocity(velocity); // Apply velocity to the sphere
+
+            let newCounter = teamCounter - finalSpeed; // Deduct used resources
+            setCurrentTeamCounter(newCounter); // Update the team's resources
+        };
+
+        // Function to switch turns between teams
+        function switchTurn() {
+            currentTurn = (currentTurn === "blue") ? "red" : "blue"; // Switch team
+            turnMessage.text = currentTurn.charAt(0).toUpperCase() + currentTurn.slice(1) + " turn"; // Update message
+            turnMessage.color = (currentTurn === "blue") ? "blue" : "red"; // Change message color
+        }
+
+        // Function to check if the camera has moved
+        function cameraHasMoved() {
+            const moved = (camera.alpha !== lastCameraAlpha || camera.beta !== lastCameraBeta || camera.radius !== lastCameraRadius);
+            lastCameraAlpha = camera.alpha; // Update last position
+            lastCameraBeta = camera.beta;
+            lastCameraRadius = camera.radius;
+            return moved;
+        }
+
+        // Before each frame is rendered
+        scene.onBeforeRenderObservable.add(() => {
+            let moved = cameraHasMoved(); // Check if camera moved
+            if (createBoxMode && moved) {
+                createBoxMode = false; // Turn off box creation mode
+                buttonCreateBox.background = "gray"; // Change button color
+            }
+
+            // Hide the initial message when the camera moves for the first time
+            if (!cameraMovedOnce && moved) {
+                cameraMovedOnce = true;
+                if (initialMessage && initialMessage.isVisible) {
+                    initialMessage.isVisible = false;
+                }
+            }
+        });
+
+        // Handle user interactions like clicks and double clicks
+        scene.onPointerObservable.add((pointerInfo) => {
+            if (gameOver) return; // If game is over, do nothing
+
+            // If the user double-clicks (or double-taps)
+            if (pointerInfo.type === BABYLON.PointerEventTypes.POINTERDOUBLETAP) {
+                // Hide initial message if camera has moved
+                if (!cameraMovedOnce && cameraHasMoved()) {
+                    cameraMovedOnce = true;
+                    if (initialMessage && initialMessage.isVisible) {
+                        initialMessage.isVisible = false;
+                    }
+                }
+
+                const pickInfo = pointerInfo.pickInfo; // Get information about what was clicked
+                if (!pickInfo || !pickInfo.hit) return; // If nothing was clicked, do nothing
+                const pickedMesh = pickInfo.pickedMesh; // Get the clicked object
+
+                // If a sphere (ball) was clicked
+                if (pickedMesh && pickedMesh.name.startsWith("sphere_")) {
+                    if (pickedMesh.teamColor !== currentTurn) return; // Only allow clicking your own team's balls
+                    pickedMesh._verticalEnabled = false; // Disable vertical movement
+                    setSphereVelocity(pickedMesh, pickInfo); // Shoot the ball
+
+                    // If in box creation mode, turn it off
+                    if (createBoxMode) {
+                        createBoxMode = false;
+                        buttonCreateBox.background = "gray";
+                    }
+
+                    switchTurn(); // Switch to the other team's turn
+                    return;
+                }
+            }
+
+            // If the user releases a pointer (like lifting a finger or releasing a mouse button)
+            if (pointerInfo.type === BABYLON.PointerEventTypes.POINTERUP) {
+                // Hide initial message if camera has moved
+                if (!cameraMovedOnce && cameraHasMoved()) {
+                    cameraMovedOnce = true;
+                    if (initialMessage && initialMessage.isVisible) {
+                        initialMessage.isVisible = false;
+                    }
+                }
+
+                const pickInfo = pointerInfo.pickInfo; // Get information about what was clicked
+                if (!pickInfo || !pickInfo.hit) return; // If nothing was clicked, do nothing
+                const pickedMesh = pickInfo.pickedMesh; // Get the clicked object
+
+                const teamCounter = getCurrentTeamCounter(); // Get current team's resources
+                // If in box creation mode and clicked on the ground or a box
+                if (createBoxMode && pickedMesh && (pickedMesh.name === "plane" || pickedMesh.name.startsWith("box"))) {
+                    if (teamCounter < 20) { // Need at least 20 resources to create a box
+                        return;
+                    }
+
+                    let position = pickInfo.pickedPoint.clone(); // Get where to place the box
+                    if (pickedMesh.name === "plane") {
+                        position.y = 0.5; // Place box on the ground
+                    } else if (pickedMesh.name.startsWith("box")) {
+                        position.y = pickedMesh.position.y + 1; // Stack box on another box
+                    }
+
+                    setCurrentTeamCounter(teamCounter - 20); // Deduct resources
+                    createRandomGreenBoxAtPosition(position); // Create the box
+                    return;
+                }
+            }
+        });
+
+        // Functions to get random colors for blue and red balls
+        function getRandomBlueColor() {
+            return new BABYLON.Color3(
+                0.0 + Math.random() * 0.3,
+                0.0 + Math.random() * 0.3,
+                0.5 + Math.random() * 0.5
+            );
+        }
+
+        function getRandomRedColor() {
+            return new BABYLON.Color3(
+                0.5 + Math.random() * 0.5,
+                0.0 + Math.random() * 0.3,
+                0.0 + Math.random() * 0.3
+            );
+        }
+
+        // Create 8 balls (spheres) in a circle at the center
+        const centerRadius = 3;
+        for (let i = 0; i < 8; i++) {
+            const angle = (Math.PI * 2 / 8) * i; // Divide the circle into 8 parts
+            const x = centerRadius * Math.cos(angle);
+            const z = centerRadius * Math.sin(angle);
+            const isBlue = (i % 2 === 0); // Alternate between blue and red
+            const sphereColor = isBlue ? getRandomBlueColor() : getRandomRedColor();
+
+            // Create the sphere (ball)
+            const sphere = BABYLON.MeshBuilder.CreateSphere("sphere_center_" + i, { diameter: 1 }, scene);
+            sphere.position.set(x, 0.5, z); // Set position
+            sphere.isPickable = true; // Balls can be clicked
+            const sphereMaterial = new BABYLON.StandardMaterial("sphereMat" + i, scene);
+            sphereMaterial.diffuseColor = sphereColor; // Set color
+            sphere.material = sphereMaterial;
+            // Add physics to the sphere
+            sphere.physicsImpostor = new BABYLON.PhysicsImpostor(
+                sphere,
+                BABYLON.PhysicsImpostor.SphereImpostor,
+                { mass: 1, restitution: 1.0, friction: 1 },
+                scene
+            );
+            // Adjust some physics properties
+            sphere.physicsImpostor.executeNativeFunction((body) => {
+                body.linearDamping = 0.1; // Slow down movement over time
+                body.angularDamping = 0.1; // Slow down rotation over time
+                body.allowSleep = true; // Let the sphere stop moving when it's not
+                body.sleepSpeedLimit = 0.05;
+                body.sleepTimeLimit = 1.5;
+            });
+
+            sphere._initialY = sphere.position.y; // Remember the starting height
+            sphere._verticalEnabled = true; // Allow vertical movement
+            sphere.teamColor = isBlue ? "blue" : "red"; // Assign team color
+
+            shadowGenerator.addShadowCaster(sphere, true); // Let spheres cast shadows
+            spheres.push(sphere); // Add the sphere to the array of spheres
+        }
+
+        // After physics calculations each frame
+        scene.onAfterPhysicsObservable.add(() => {
+            const deltaTime = engine.getDeltaTime() / 1000; // Time since last frame
+            const currentFriction = frictionCoefficient; // Current friction
+
+            // Apply friction to each sphere
+            spheres.forEach(s => {
+                const impostor = s.physicsImpostor;
+                if (impostor) {
+                    let velocity = impostor.getLinearVelocity(); // Get current velocity
+                    if (!velocity) return;
+                    const speed = velocity.length(); // Get speed
+                    if (speed > 0) {
+                        const distanceThisFrame = speed * deltaTime; // How much it moves this frame
+                        const newSpeed = Math.max(speed - currentFriction * distanceThisFrame, 0); // Reduce speed
+                        if (newSpeed < speed) {
+                            velocity = velocity.scale(newSpeed / speed); // Scale velocity
+                            impostor.setLinearVelocity(velocity); // Set new velocity
+                        }
+                    }
+
+                    // If the sphere has slowed down enough, allow vertical movement again
+                    if (!s._verticalEnabled && speed < 0.01) {
+                        s._verticalEnabled = true;
+                    }
+                }
+            });
+
+            const boundary = planeSize / 2; // Define the boundary of the ground
+            // Check if any spheres have gone out of bounds or fallen down
+            for (let i = spheres.length - 1; i >= 0; i--) {
+                const s = spheres[i];
+                if (Math.abs(s.position.x) > boundary + 5 ||
+                    Math.abs(s.position.z) > boundary + 5 ||
+                    s.position.y < -10) {
+                    if (s.teamColor === "blue") {
+                        blueBallsCount--; // Reduce blue balls count
+                    } else {
+                        redBallsCount--; // Reduce red balls count
+                    }
+                    s.dispose(); // Remove the sphere from the scene
+                    spheres.splice(i, 1); // Remove from the array
+                    checkWinCondition(); // Check if someone won
+                }
+            }
+
+            // Check if any boxes have gone out of bounds or fallen down
+            for (let i = boxes.length - 1; i >= 0; i--) {
+                const b = boxes[i];
+                if (Math.abs(b.position.x) > boundary + 5 ||
+                    Math.abs(b.position.z) > boundary + 5 ||
+                    b.position.y < -10) {
+                    b.dispose(); // Remove the box from the scene
+                    boxes.splice(i, 1); // Remove from the array
+                }
+            }
+
+            // Count how many boxes are on the ground for each team
+            redBoxesOnGround = 0;
+            blueBoxesOnGround = 0;
+            boxes.forEach(box => {
+                if (box.position.y >= 1.3) { // If box is on the ground
+                    if (box.teamColor == "red") {
+                        redBoxesOnGround++;
+                    } else if (box.teamColor == "blue") {
+                        blueBoxesOnGround++;
+                    }
+                }
+            });
+
+            updateCounters(); // Update the UI with new counts
+        });
+
+        // Keep track of time to animate spheres
+        let startTime = performance.now();
+        scene.onBeforeRenderObservable.add(() => {
+            const time = (performance.now() - startTime) / 1000; // Current time in seconds
+
+            // Set how much the balls move up and down
+            let redAmplitude = (currentTurn === "blue") ? 0.1 : 0.01;
+            let blueAmplitude = (currentTurn === "red") ? 0.1 : 0.01;
+            const frequency = 1; // How fast the balls move up and down
+
+            // Animate each sphere to move up and down
+            spheres.forEach((s, i) => {
+                if (s._initialY === undefined) {
+                    s._initialY = s.position.y; // Remember starting Y position
+                }
+                if (s._verticalEnabled) { // If vertical movement is allowed
+                    let amplitude = s.teamColor === "red" ? redAmplitude : blueAmplitude;
+                    s.position.y = s._initialY + amplitude * Math.sin(2 * Math.PI * frequency * time + i); // Move up and down
+                }
+            });
+        });
+
+        return scene; // Return the created scene
+    };
+
+    const scene = createScene(); // Create the scene
+    engine.runRenderLoop(() => {
+        scene.render(); // Render the scene every frame
+    });
+    // Adjust the canvas size when the window is resized
+    window.addEventListener("resize", () => {
+        engine.resize();
+    });
+</script>
+</body>
+</html>
